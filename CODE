@@ -1,0 +1,242 @@
+// This program includes the use of RTC, Flowmeter, Atmospheric pressure, atmospheric humidity, atmospheric temperature, PH sensor.
+// All these sensors are programmed to be run with Arduino NANO at 115200 baud rate
+// Pin Connections are as per Arduino MEGA 2560
+//LCD >> RS = 37; EN = 36; D4 = 35; D5 = 34; D6 = 33; D7 = 32;
+//PH >> Analog Data pin = A0;
+//Turbidity >> Analog Data pin = A1;
+//Flow sensor >> data pin to D2;
+//BME >> SDA, SCL;
+//MicroSD Card adapter >>  CS = D4; MOSI, MISO, SCLK To ICSP Pins;
+//RTC >> CLK = D7; DAT = D6; RST = D5;
+
+#include<stdio.h>
+#include<DS1302.h>
+#include<cactus_io_BME280_I2C.h>
+#include<Wire.h>
+#include<SPI.h>
+#include<SD.h>
+#include<LiquidCrystal.h>
+
+//WATER FLOW SENSOR
+byte statusLed = 13;
+byte sensorInterrupt = 0;
+byte sensorPin = 2;
+float calibrationFactor = 4.5;
+volatile byte pulseCount;
+float flowRate;
+unsigned int flowMilliLitres;
+unsigned long totalMilliLitres;
+unsigned long oldTime;
+
+//MicroSD Card
+const int chipSelect = 4;
+File myFile;
+
+//LCD Display
+const int rs = 37, en = 36, d4 = 35, d5 = 34, d6 = 33, d7 = 32;
+LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+
+//RTC
+const int kCePin = 5;
+const int kIoPin = 6;
+const int kSclkPin = 7;
+DS1302 rtc (kCePin, kIoPin, kSclkPin);
+String dayAsString(const Time::Day day) 
+{
+  switch (day) {
+    case Time::kSunday: return "Sunday";
+    case Time::kMonday: return "Monday";
+    case Time::kTuesday: return "Tuesday";
+    case Time::kWednesday: return "Wednesday";
+    case Time::kThursday: return "Thursday";
+    case Time::kFriday: return "Friday";
+    case Time::kSaturday: return "Saturday";
+  }
+  return "(unknown day)";
+}
+
+//PH meter
+const byte pHpin = A0;
+float Po;
+
+//Turbidity
+ int photocellPin = A1;
+
+//BME280
+BME280_I2C bme; 
+
+void setup()
+{
+  Serial.begin(115200);
+  lcd.begin(20,4);
+  lcd.setCursor(2,0);
+  lcd.print("!!INITIALIZING!!");
+  lcd.setCursor(0,1);
+  lcd.print("PH TDS TEMP PRES HUM");
+  lcd.setCursor(1,2);
+  lcd.print("RTC SD-STORAGE FLOW");
+  lcd.setCursor(7,3);
+  lcd.print("BY-WII");
+  delay(5000);
+  lcd.clear(); 
+
+  pinMode(statusLed, OUTPUT);
+  pinMode (photocellPin, INPUT);
+  digitalWrite(statusLed, HIGH);
+  pinMode(sensorPin, INPUT);
+  digitalWrite(sensorPin, HIGH);
+  pulseCount        = 0;
+  flowRate          = 0.0;
+  flowMilliLitres   = 0;
+  totalMilliLitres  = 0;
+  oldTime           = 0;
+  attachInterrupt(sensorInterrupt, pulseCounter, FALLING);    //WATER FLOW SENSOR
+
+  if (!bme.begin())
+  {
+    Serial.print("Could not find a valid sensor");
+    while (1);
+  }
+  bme.setTempCal(-1);
+  
+  if (!SD.begin(4))
+  {
+    Serial.println("initialization failed!");
+    return;
+  }
+  myFile = SD.open("data.txt", FILE_WRITE);
+  if (myFile)
+  {
+    myFile.println("DAY|DATE|TIME|FLOW_RATE|CURRENT_LIQUID_FLOWING|PRESSURE_MB|HUMIDITY_%|TEMP_C|TEMP_F|pH_Value|TDS");
+  }
+  Serial.println("DAY|DATE|TIME|FLOW_RATE|CURRENT_LIQUID_FLOWING|PRESSURE_MB|HUMIDITY_%|TEMP_C|TEMP_F|pH_Value|TDS");
+}
+
+void loop()
+{
+  if ((millis() - oldTime) > 1000)
+     {
+      detachInterrupt(sensorInterrupt);
+      flowRate = ((1000.0 / (millis() - oldTime)) * pulseCount) / calibrationFactor;
+      oldTime = millis();
+      flowMilliLitres = (flowRate / 60) * 1000;
+      totalMilliLitres += flowMilliLitres;
+      }
+ 
+ //   for (int positionCounter = 0; positionCounter < 40; positionCounter++)
+ // {
+ //   lcd.scrollDisplayLeft();
+ //   delay(300);
+ // }
+
+ float val = analogRead(photocellPin);
+  float ardval = val*0.00488758553;
+  float r1 = (5000/ardval)-10000;
+  float I = ardval/r1;
+  float NTUval = I*70000;
+   
+  unsigned int frac;
+  Time t = rtc.time();
+  const String day = dayAsString(t.day);
+  char buf[50];
+  char buf2[50];
+  snprintf(buf, sizeof(buf), "%s|%04d-%02d-%02d|%02d:%02d:%02d|", day.c_str(), t.yr, t.mon, t.date, t.hr, t.min, t.sec);
+  snprintf(buf2, sizeof(buf2), "|%02d:%02d:%02d|", t.hr, t.min, t.sec);
+  Serial.print(buf);
+  Serial.print("|");
+  Serial.print("Flow rate:");
+  Serial.print(int(flowRate));
+  Serial.print(".");
+  frac = (flowRate - int(flowRate)) * 10;
+  Serial.print(frac, DEC);
+  Serial.print("L/Min");
+  Serial.print("|");
+  Serial.print("Current Liquid Flowing:");             // Output separator
+  Serial.print(flowMilliLitres);
+  Serial.print("mL/Sec");
+  Serial.print("|");
+  pulseCount = 0;
+  attachInterrupt(sensorInterrupt, pulseCounter, FALLING);
+  
+  Po = (1023 - analogRead(pHpin));
+  Po = map(Po, 0, 1023, 0, 14);
+  
+  myFile = SD.open("data.txt", FILE_WRITE);
+  myFile.print(buf);
+  myFile.print("|");
+  
+  myFile.print(int(flowRate));
+  myFile.print(".");
+  myFile.print(frac , DEC);
+  myFile.print("|");
+  myFile.print(flowMilliLitres);
+  myFile.print("|");
+  
+  bme.readSensor();
+  float a = bme.getPressure_MB();
+  Serial.print(a);
+  Serial.print("|");
+  myFile.print(a);
+  myFile.print("|");
+  
+  float b = bme.getHumidity();
+  Serial.print(b);
+  Serial.print("|");
+  myFile.print(b);
+  myFile.print("|");
+
+  float c = bme.getTemperature_C();
+  Serial.print(c);
+  Serial.print("|");
+  myFile.print(c);
+  myFile.print("|");
+
+  float d = bme.getTemperature_F();
+  Serial.print(d);
+
+  myFile.print(d);
+  Serial.print("|");
+  Serial.print(Po);
+  Serial.print("|");
+  
+  myFile.print("|");
+  myFile.print(Po);
+  
+  Serial.println(NTUval);
+  myFile.print("|");
+  myFile.print(NTUval);
+  myFile.println("|");
+  
+  lcd.setCursor(0,0);
+  lcd.print("CLF:");
+  lcd.print(flowMilliLitres);
+  lcd.print("ml/Sec ");
+  lcd.setCursor(17,0);
+  lcd.print("WII");
+  lcd.setCursor(0,1);
+  lcd.print("P:");
+  lcd.print(a);
+  lcd.print("MB ");
+  lcd.print("T:");
+  lcd.print(c);
+  lcd.print("C");
+  lcd.setCursor(0,2);
+  lcd.print("H:");
+  lcd.print(b);
+  lcd.print("% ");
+  lcd.print("pH:");
+  lcd.print(Po);
+  lcd.setCursor(0,3);
+  lcd.print("TDS:");
+  lcd.print(NTUval);
+  lcd.print(" ");
+  lcd.print(buf2);
+  
+  
+  myFile.close();
+  delay(1000);
+}
+void pulseCounter()
+{
+    pulseCount++;
+}
